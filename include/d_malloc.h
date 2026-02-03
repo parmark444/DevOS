@@ -31,5 +31,6 @@ void add_to_free_list(block_t *block);
 void remove_from_free_list(block_t *block);
 block_t *get_header(void *ptr);
 void *get_payload(block_t *block);
+int get_size_class(size_t size);
 
 #endif // D_MALLOC_H
