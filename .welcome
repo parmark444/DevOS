@@ -1,0 +1,11 @@
+DevOS - Development Operating System
+
+Current Directory: /devos
+
+Directory Structure:
+  /devos/src/         - Source code
+  /devos/include/     - Header files
+  /devos/lib/         - Compiled libraries
+  /devos/tests/       - Test programs
+  /devos/build/       - Build artifacts
+
