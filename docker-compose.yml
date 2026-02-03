@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  devos:
+    build: .
+    image: devos:latest
+    container_name: devos-dev
+    volumes:
+      - devos-volume:/devos
+    stdin_open: true
+    tty: true
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_PTRACE
+
+volumes:
+  devos-volume:
