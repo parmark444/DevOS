@@ -19,7 +19,8 @@ static bool heap_initialized = false;
 #define MIN_BLOCK_SIZE (sizeof(block_t) + 8) // Minimum block size to hold header and payload
 
 // Size class boundaries 
-static const size_t size_classes[NUM_CLASSES] = {
+static const size_t size_classes[NUM_CLASSES] = 
+{
     32,      // Class 0: 1-32 bytes
     64,      // Class 1: 33-64 bytes
     128,     // Class 2: 65-128 bytes
@@ -68,7 +69,6 @@ void init_heap(void)
 
 void *extend_heap(size_t size) 
 {
-    // TODO: Implement mmap allocation
     void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
     if  (ptr == MAP_FAILED)
@@ -76,12 +76,19 @@ void *extend_heap(size_t size)
         cerror("mmap failed in extend_heap\n");
         return NULL;
     }
-    return NULL;
+    
+    // Update heap bounds
+    if (heap_start == NULL)
+    {
+        heap_start = ptr;
+    }
+    heap_end = (char *)ptr + size;
+    
+    return ptr;
 }
 
 void *find_fit(size_t size) 
 {
-    // TODO: Implement first-fit search
     if (size == 0)
     {
         return NULL;
@@ -115,54 +122,263 @@ size_t internal_size(size_t size)
 
 void place(block_t *block, size_t size) 
 {
-    // TODO: Implement block placement
     block->free = false;
     remove_from_free_list(block);
 }
 
 void split_block(block_t *block, size_t size)
 {
-    // TODO: Implement block splitting
     size_t leftover = block->size - size;
 
     if (leftover >= MIN_BLOCK_SIZE) 
     {
+        // Create new block from leftover space
         block_t *new_block = (block_t *)((char *)block + size);
         new_block->size = leftover;
         new_block->free = true;
+        
+        // Inherit the original block's free list links
+        new_block->next = block->next;
+        new_block->prev = block->prev;
+        
+        // Update the linked list to point to new block
+        if (block->next != NULL)
+        {
+            block->next->prev = new_block;
+        }
+        if (block->prev != NULL)
+        {
+            block->prev->next = new_block;
+        }
+        else
+        {
+            // This was the head of the free list, update it
+            size_t class = get_size_class(new_block->size);
+            free_lists[class] = new_block;
+        }
+        
+        // Update original block size and clear its free list pointers
         block->size = size;
-        add_to_free_list(new_block);
+        block->next = NULL;
+        block->prev = NULL;
+    }
+    else
+    {
+        // Not enough leftover to split, use entire block
+        // Remove from free list by updating neighbors
+        if (block->next != NULL)
+        {
+            block->next->prev = block->prev;
+        }
+        if (block->prev != NULL)
+        {
+            block->prev->next = block->next;
+        }
+        else
+        {
+            // This was the head of the free list, update it
+            size_t class = get_size_class(block->size);
+            free_lists[class] = block->next;
+        }
+        
+        // Clear the block's free list pointers
+        block->next = NULL;
+        block->prev = NULL;
+    }
+}
+
+void coalesce(block_t *block) 
+{
+    if (heap_start == NULL || block == NULL)
+    {
+        return;
     }
     
-    block->size = size;
-    add_to_free_list(block);
+    // Forward coalescing - check next physical block
+    block_t *next = (block_t *)((char *)block + block->size);
+    
+    // Check if next block is within heap and is free
+    if ((void *)next < heap_end && next->free)
+    {
+        // Merge next block into current
+        block->size += next->size;
+        
+        // Remove next from its free list
+        remove_from_free_list(next);
+    }
+    
+    // Backward coalescing - find previous physical block
+    if ((void *)block > heap_start)
+    {
+        block_t *prev = NULL;
+        block_t *current = (block_t *)heap_start;
+        
+        // Walk forward from heap start to find block right before us
+        while (current != NULL && (void *)current < (void *)block)
+        {
+            block_t *next_block = (block_t *)((char *)current + current->size);
+            
+            // Check if current block ends right where our block starts
+            if (next_block == block)
+            {
+                prev = current;
+                break;
+            }
+            
+            // Move to next physical block
+            current = next_block;
+            
+            // Safety check: don't go past the block we're coalescing
+            if ((void *)current >= (void *)block)
+            {
+                break;
+            }
+        }
+        
+        // If we found a previous free block, merge current into it
+        if (prev != NULL && prev->free)
+        {
+            // Remove current block from its free list first
+            remove_from_free_list(block);
+            
+            // Merge current into previous
+            prev->size += block->size;
+            
+            // Now prev is the coalesced block, continue with it
+            block = prev;
+        }
+    }
 }
 
-void coalesce(block_t *block) {
-    // TODO: Implement coalescing
+void add_to_free_list(block_t *block) 
+{
+    size_t currentSize = get_size_class(block->size);
+    block->next = free_lists[currentSize];
+    block->prev = NULL;
+    
+    if (free_lists[currentSize] != NULL) 
+    {
+        free_lists[currentSize]->prev = block;
+    }
+
+    free_lists[currentSize] = block;
 }
 
-void add_to_free_list(block_t *block) {
-    // TODO: Implement adding to free list
-}
+void remove_from_free_list(block_t *block) 
+{
+    size_t currentSize = get_size_class(block->size);
+    
+    if (block->prev != NULL)
+    {
+        block->prev->next = block->next;
+    }
+    else  
+    {
+        free_lists[currentSize] = block->next;
+    }
 
-void remove_from_free_list(block_t *block) {
-    // TODO: Implement removing from free list
+    if (block->next != NULL)
+    {
+        block->next->prev = block->prev;
+    }
+
+    block->next = NULL;
+    block->prev = NULL;
 }
 
 // Main allocator functions
-void *d_malloc(size_t size) {
-    // TODO: Implement malloc
+void *d_malloc(size_t size) 
+{
+    init_heap();
+
+    if (size == 0)
+    {
+        return NULL;
+    }
+
+    size_t internalSize = internal_size(size);
+    block_t *block = find_fit(internalSize);
+
+    if (block != NULL)
+    {
+        place(block, internalSize);
+        split_block(block, internalSize);
+        return get_payload(block);
+    }
+    else 
+    {
+        size_t allocSize = (internalSize > HEAP_INCREMENT) ? internalSize : HEAP_INCREMENT;
+        void *ptr = extend_heap(allocSize);
+        if (ptr == NULL)
+        {
+            return NULL;
+        }
+        block_t *new_block = (block_t *)ptr;
+        new_block->size = allocSize;
+        new_block->free = true;
+        add_to_free_list(new_block);
+        return d_malloc(size);
+    }
     return NULL;
 }
 
-void d_free(void *ptr) {
-    // TODO: Implement free
+void d_free(void *ptr) 
+{
+    if (ptr == NULL)
+    {
+        return;
+    }
+
+    block_t *block = get_header(ptr);
+    block->free = true;
+    coalesce(block);
+    add_to_free_list(block);
 }
 
-void *d_realloc(void *ptr, size_t size) {
-    // TODO: Implement realloc
-    return NULL;
+void *d_realloc(void *ptr, size_t size) 
+{
+    // Edge case: ptr is NULL, act like malloc
+    if (ptr == NULL)
+    {
+        return d_malloc(size);
+    }
+    
+    // Edge case: size is 0, act like free
+    if (size == 0)
+    {
+        d_free(ptr);
+        return NULL;
+    }
+    
+    block_t *block = get_header(ptr);
+    size_t new_size = internal_size(size);
+    
+    // Same size, do nothing
+    if (block->size == new_size)
+    {
+        return ptr;
+    }
+
+    // Shrinking
+    if (block->size >= new_size)
+    {
+        split_block(block, new_size);
+        return ptr;
+    }
+
+    // Growing - need to allocate new block
+    void *new_ptr = d_malloc(size);
+    if (new_ptr == NULL)
+    {   
+        return NULL;
+    }
+    
+    // Copy minimum of old and new payload size
+    size_t old_payload_size = block->size - sizeof(block_t);
+    size_t copy_size = (old_payload_size < size) ? old_payload_size : size;
+    memcpy(new_ptr, ptr, copy_size);
+    d_free(ptr);
+    return new_ptr;
 }
 
 void *d_calloc(size_t num, size_t size) {
