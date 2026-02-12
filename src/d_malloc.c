@@ -73,7 +73,6 @@ void *extend_heap(size_t size)
 
     if  (ptr == MAP_FAILED)
     {
-        cerror("mmap failed in extend_heap\n");
         return NULL;
     }
     
@@ -120,14 +119,9 @@ size_t internal_size(size_t size)
     return aligned_size(size) + sizeof(block_t); // Account for block header
 }
 
-void place(block_t *block, size_t size) 
-{
-    block->free = false;
-    remove_from_free_list(block);
-}
-
 void split_block(block_t *block, size_t size)
 {
+    // Assumes block is NOT in free list
     size_t leftover = block->size - size;
 
     if (leftover >= MIN_BLOCK_SIZE) 
@@ -136,54 +130,14 @@ void split_block(block_t *block, size_t size)
         block_t *new_block = (block_t *)((char *)block + size);
         new_block->size = leftover;
         new_block->free = true;
+        new_block->next = NULL;
+        new_block->prev = NULL;
         
-        // Inherit the original block's free list links
-        new_block->next = block->next;
-        new_block->prev = block->prev;
-        
-        // Update the linked list to point to new block
-        if (block->next != NULL)
-        {
-            block->next->prev = new_block;
-        }
-        if (block->prev != NULL)
-        {
-            block->prev->next = new_block;
-        }
-        else
-        {
-            // This was the head of the free list, update it
-            size_t class = get_size_class(new_block->size);
-            free_lists[class] = new_block;
-        }
-        
-        // Update original block size and clear its free list pointers
+        // Update original block size
         block->size = size;
-        block->next = NULL;
-        block->prev = NULL;
-    }
-    else
-    {
-        // Not enough leftover to split, use entire block
-        // Remove from free list by updating neighbors
-        if (block->next != NULL)
-        {
-            block->next->prev = block->prev;
-        }
-        if (block->prev != NULL)
-        {
-            block->prev->next = block->next;
-        }
-        else
-        {
-            // This was the head of the free list, update it
-            size_t class = get_size_class(block->size);
-            free_lists[class] = block->next;
-        }
         
-        // Clear the block's free list pointers
-        block->next = NULL;
-        block->prev = NULL;
+        // Add the new free block to the appropriate free list
+        add_to_free_list(new_block);
     }
 }
 
@@ -301,25 +255,36 @@ void *d_malloc(size_t size)
 
     if (block != NULL)
     {
-        place(block, internalSize);
+        // Remove from free list and mark as allocated
+        remove_from_free_list(block);
+        block->free = false;
+        
+        // Split if needed (adds remainder to free list)
         split_block(block, internalSize);
+        
         return get_payload(block);
     }
     else 
     {
+        // Allocate new heap space
         size_t allocSize = (internalSize > HEAP_INCREMENT) ? internalSize : HEAP_INCREMENT;
         void *ptr = extend_heap(allocSize);
         if (ptr == NULL)
         {
             return NULL;
         }
+        
         block_t *new_block = (block_t *)ptr;
         new_block->size = allocSize;
-        new_block->free = true;
-        add_to_free_list(new_block);
-        return d_malloc(size);
+        new_block->free = false;
+        new_block->next = NULL;
+        new_block->prev = NULL;
+        
+        // Split if we allocated more than needed
+        split_block(new_block, internalSize);
+        
+        return get_payload(new_block);
     }
-    return NULL;
 }
 
 void d_free(void *ptr) 
@@ -381,7 +346,19 @@ void *d_realloc(void *ptr, size_t size)
     return new_ptr;
 }
 
-void *d_calloc(size_t num, size_t size) {
-    // TODO: Implement calloc
-    return NULL;
+void *d_calloc(size_t num, size_t size) 
+{
+    if (num != 0 && size > SIZE_MAX / num)
+    {
+        return NULL; // Prevent overflow
+    }
+
+    size_t total_size = num * size;
+    void *ptr = d_malloc(total_size);
+    if (ptr != NULL)
+    {
+        memset(ptr, 0, total_size);
+    } 
+
+    return ptr;
 }
