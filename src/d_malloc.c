@@ -16,7 +16,7 @@ static bool heap_initialized = false;
 #define PAGE_SIZE 4096
 #define HEAP_INCREMENT (PAGE_SIZE * 4) // 16KB at a time
 
-#define MIN_BLOCK_SIZE (sizeof(block_t) + 8) // Minimum block size to hold header and payload
+#define MIN_BLOCK_SIZE (sizeof(block_t) + sizeof(footer_t) + 8) // Minimum block size
 
 // Size class boundaries 
 static const size_t size_classes[NUM_CLASSES] = 
@@ -40,6 +40,17 @@ block_t *get_header(void *ptr)
 void *get_payload(block_t *block)
 {
     return (void *)((char *)block + sizeof(block_t));
+}
+
+footer_t *get_footer(block_t *block)
+{
+    return (footer_t *)((char *)block + block->size - sizeof(footer_t));
+}
+
+void set_footer(block_t *block)
+{
+    footer_t *footer = get_footer(block);
+    footer->size = block->size;
 }
 
 size_t get_size_class(size_t size)
@@ -97,13 +108,16 @@ void *find_fit(size_t size)
     for (size_t i = class; i < NUM_CLASSES; i++)
     {
         block_t *current = free_lists[i];
-        while (current != NULL)
+        int search_limit = 100; // Limit search depth to avoid O(n) behavior
+        
+        while (current != NULL && search_limit > 0)
         {
             if (current->free && current->size >= size)
             {
                 return current;
             }
             current = current->next;
+            search_limit--;
         }
     }
     return NULL;
@@ -116,7 +130,7 @@ size_t aligned_size(size_t size)
 
 size_t internal_size(size_t size) 
 {
-    return aligned_size(size) + sizeof(block_t); // Account for block header
+    return aligned_size(size) + sizeof(block_t) + sizeof(footer_t); // Header + Footer
 }
 
 void split_block(block_t *block, size_t size)
@@ -126,15 +140,17 @@ void split_block(block_t *block, size_t size)
 
     if (leftover >= MIN_BLOCK_SIZE) 
     {
+        // Update original block size first
+        block->size = size;
+        set_footer(block);
+        
         // Create new block from leftover space
         block_t *new_block = (block_t *)((char *)block + size);
         new_block->size = leftover;
         new_block->free = true;
         new_block->next = NULL;
         new_block->prev = NULL;
-        
-        // Update original block size
-        block->size = size;
+        set_footer(new_block);
         
         // Add the new free block to the appropriate free list
         add_to_free_list(new_block);
@@ -143,64 +159,21 @@ void split_block(block_t *block, size_t size)
 
 void coalesce(block_t *block) 
 {
-    if (heap_start == NULL || block == NULL)
+    if (block == NULL)
     {
         return;
     }
     
-    // Forward coalescing - check next physical block
     block_t *next = (block_t *)((char *)block + block->size);
     
-    // Check if next block is within heap and is free
-    if ((void *)next < heap_end && next->free)
+    // Simple bounds check: only coalesce if next block is close
+    // This avoids accessing unmapped memory between mmap regions
+    if ((char *)next + sizeof(block_t) <= (char *)heap_end && next->free)
     {
         // Merge next block into current
-        block->size += next->size;
-        
-        // Remove next from its free list
         remove_from_free_list(next);
-    }
-    
-    // Backward coalescing - find previous physical block
-    if ((void *)block > heap_start)
-    {
-        block_t *prev = NULL;
-        block_t *current = (block_t *)heap_start;
-        
-        // Walk forward from heap start to find block right before us
-        while (current != NULL && (void *)current < (void *)block)
-        {
-            block_t *next_block = (block_t *)((char *)current + current->size);
-            
-            // Check if current block ends right where our block starts
-            if (next_block == block)
-            {
-                prev = current;
-                break;
-            }
-            
-            // Move to next physical block
-            current = next_block;
-            
-            // Safety check: don't go past the block we're coalescing
-            if ((void *)current >= (void *)block)
-            {
-                break;
-            }
-        }
-        
-        // If we found a previous free block, merge current into it
-        if (prev != NULL && prev->free)
-        {
-            // Remove current block from its free list first
-            remove_from_free_list(block);
-            
-            // Merge current into previous
-            prev->size += block->size;
-            
-            // Now prev is the coalesced block, continue with it
-            block = prev;
-        }
+        block->size += next->size;
+        set_footer(block);
     }
 }
 
@@ -262,6 +235,9 @@ void *d_malloc(size_t size)
         // Split if needed (adds remainder to free list)
         split_block(block, internalSize);
         
+        // Update footer
+        set_footer(block);
+        
         return get_payload(block);
     }
     else 
@@ -279,6 +255,7 @@ void *d_malloc(size_t size)
         new_block->free = false;
         new_block->next = NULL;
         new_block->prev = NULL;
+        set_footer(new_block);
         
         // Split if we allocated more than needed
         split_block(new_block, internalSize);
@@ -361,4 +338,72 @@ void *d_calloc(size_t num, size_t size)
     } 
 
     return ptr;
+}
+
+// ============================================================================
+// VISUALIZATION AND DEBUG HELPERS
+// ============================================================================
+
+// Get statistics about allocator state (useful for visualization)
+void d_get_stats(size_t *total_allocated, size_t *total_free, size_t *num_free_blocks)
+{
+    *total_allocated = 0;
+    *total_free = 0;
+    *num_free_blocks = 0;
+    
+    if (heap_start == NULL) {
+        return;
+    }
+    
+    // Count free blocks
+    for (int i = 0; i < NUM_CLASSES; i++) {
+        block_t *current = free_lists[i];
+        while (current != NULL) {
+            (*num_free_blocks)++;
+            *total_free += current->size;
+            current = current->next;
+        }
+    }
+    
+    // Calculate total heap size
+    if (heap_end != NULL && heap_start != NULL) {
+        size_t total_heap = (char *)heap_end - (char *)heap_start;
+        *total_allocated = total_heap - *total_free;
+    }
+}
+
+// Iterate through all free blocks in a size class (for visualization)
+// Returns pointer to next block, or NULL if no more blocks
+block_t *d_get_free_list(int size_class, block_t *current)
+{
+    if (size_class < 0 || size_class >= NUM_CLASSES) {
+        return NULL;
+    }
+    
+    if (current == NULL) {
+        // Start of list
+        return free_lists[size_class];
+    } else {
+        // Next block
+        return current->next;
+    }
+}
+
+// Get information about a block (for visualization)
+void d_get_block_info(block_t *block, size_t *size, int *is_free, void **payload_ptr)
+{
+    if (block == NULL) {
+        return;
+    }
+    
+    if (size) *size = block->size;
+    if (is_free) *is_free = block->free ? 1 : 0;
+    if (payload_ptr) *payload_ptr = get_payload(block);
+}
+
+// Get heap bounds (for visualization)
+void d_get_heap_bounds(void **start, void **end)
+{
+    if (start) *start = heap_start;
+    if (end) *end = heap_end;
 }
